@@ -52,7 +52,11 @@ spark = (
     .appName("jupyter-yarn-test")
     .master("yarn")
     .config("spark.submit.deployMode", "client")
-    .config("spark.pyspark.python", "python3")
+    # 集群无 python3，ship 一个 py38 环境给 executor（与生产 spark-submit --archives 一致）。
+    # 注意：不能设 spark.pyspark.python —— 它优先级高于 PYSPARK_PYTHON 环境变量，会让 executor 去找 python3 而失败。
+    # driver 在容器里用 venv python（sys.executable），不覆盖；executor 走 ship 的环境。
+    .config("spark.archives", "hdfs:///spark_envs/py38_spark.tar.gz#py38_env")
+    .config("spark.executorEnv.PYSPARK_PYTHON", "./py38_env/bin/python")
     .config("spark.yarn.stagingDir", f"/user/{HDFS_USER}/.sparkStaging")
     .config("spark.driver.host", DRIVER_HOST)
     .config("spark.driver.port", DRIVER_PORT)
