@@ -4,9 +4,10 @@ services:
     image: jupyter-py39:latest
     container_name: jupyter
     restart: unless-stopped
-    ports:
-      # 仅绑定本机，外网访问请走反代（nginx/traefik + TLS）
-      - "0.0.0.0:8888:8888"
+    # host 网络：Spark YARN client 模式下集群 executor 要回连容器里的 driver，
+    # bridge 网络不可达。用 host 网络让容器共享宿主机网络（集群能解析到宿主机主机名）。
+    # 代价：jupyter 直接监听宿主机 0.0.0.0:8888，务必用防火墙或反代限制访问。
+    network_mode: host
     volumes:
       # notebook 持久化
       - ./notebooks:/home/jovyan/work
