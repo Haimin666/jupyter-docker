@@ -37,7 +37,7 @@ spark = (
     SparkSession.builder
     .appName("jupyter-yarn-test")
     .master("yarn")
-    .deployMode("client")
+    .config("spark.submit.deployMode", "client")  # pyspark Builder 无 deployMode() 方法，走 config
     .config("spark.pyspark.python", "python3")  # executor 端 python；driver 用 venv python（sys.executable），不覆盖
     .config("spark.yarn.stagingDir", f"/user/{HDFS_USER}/.sparkStaging")
     .config("spark.sql.shuffle.partitions", "2")
