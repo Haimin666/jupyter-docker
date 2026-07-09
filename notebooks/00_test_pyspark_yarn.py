@@ -28,10 +28,16 @@ print("✅ 环境自检通过")
 # - `spark.yarn.stagingDir` 改成你的 HDFS 用户目录，避免权限问题
 
 # %%
+import os
 from pyspark.sql import SparkSession
 
 # >>> 改成你集群上实际能读写的 HDFS 用户 / 目录 <<<
 HDFS_USER = "hdfs"  # 例如 "hive" / 你的业务账号
+
+# 容器以 OS 用户 jovyan 运行，HDFS/YARN 客户端默认用 jovyan 身份，集群上无权限。
+# simple 认证下，设 HADOOP_USER_NAME 即可切换身份（JVM 首次访问文件系统时读取，
+# 必须在 getOrCreate 之前设）。生产环境应配 Kerberos 或 proxy user。
+os.environ["HADOOP_USER_NAME"] = HDFS_USER
 
 spark = (
     SparkSession.builder
