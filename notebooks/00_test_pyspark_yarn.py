@@ -53,10 +53,11 @@ spark = (
     .master("yarn")
     .config("spark.submit.deployMode", "client")
     # 集群无 python3，ship 一个 py38 环境给 executor（与生产 spark-submit --archives 一致）。
-    # 注意：不能设 spark.pyspark.python —— 它优先级高于 PYSPARK_PYTHON 环境变量，会让 executor 去找 python3 而失败。
-    # driver 在容器里用 venv python（sys.executable），不覆盖；executor 走 ship 的环境。
+    # 用 conf 显式指定 Python（优先级最高，高于 PYSPARK_PYTHON 环境变量）。
+    # 实测本集群 spark.executorEnv.PYSPARK_PYTHON 没传到 executor，必须用 conf 才生效。
     .config("spark.archives", "hdfs:///spark_envs/py38_spark.tar.gz#py38_env")
-    .config("spark.executorEnv.PYSPARK_PYTHON", "./py38_env/bin/python")
+    .config("spark.pyspark.python", "./py38_env/bin/python")        # executor 用 ship 的 py38
+    .config("spark.pyspark.driver.python", "/opt/venv/bin/python")  # driver 用容器 venv python（有 pyspark）
     .config("spark.yarn.stagingDir", f"/user/{HDFS_USER}/.sparkStaging")
     .config("spark.driver.host", DRIVER_HOST)
     .config("spark.driver.port", DRIVER_PORT)
