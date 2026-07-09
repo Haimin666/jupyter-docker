@@ -10,5 +10,5 @@ hive-conf/*
 !hive-conf/README.md
 
 # 用户 notebook（运行时内容，不入仓；如需跟踪个别 notebook 用 git add -f）
-notebooks/
+# notebooks/
 .ipynb_checkpoints/
