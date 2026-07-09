@@ -1,0 +1,14 @@
+.env
+*.pyc
+__pycache__/
+*.log
+
+# 集群配置（环境特定，不入仓；保留 README 占位）
+hadoop-conf/*
+!hadoop-conf/README.md
+hive-conf/*
+!hive-conf/README.md
+
+# 用户 notebook（运行时内容，不入仓；如需跟踪个别 notebook 用 git add -f）
+notebooks/
+.ipynb_checkpoints/

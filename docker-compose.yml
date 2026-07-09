@@ -1,0 +1,31 @@
+services:
+  jupyter:
+    build: .
+    image: jupyter-py39:latest
+    container_name: jupyter
+    restart: unless-stopped
+    ports:
+      # 仅绑定本机，外网访问请走反代（nginx/traefik + TLS）
+      - "127.0.0.1:8888:8888"
+    volumes:
+      # notebook 持久化
+      - ./notebooks:/home/jovyan/work
+      # 集群配置（YARN 提交用）：把集群的 core-site/hdfs-site/yarn-site/hive-site.xml 放进对应目录
+      - ./hadoop-conf:/etc/hadoop/conf:ro
+      - ./hive-conf:/etc/hive/conf:ro
+    environment:
+      - TZ=Asia/Shanghai
+      # token 从 .env 注入，避免明文入仓
+      - JUPYTER_TOKEN=${JUPYTER_TOKEN:?请在 .env 中设置 JUPYTER_TOKEN}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      # jupyter-server 2 的 /api/status 需要认证，带 token 才返回 200
+      test: ["CMD", "python", "-c", "import os,urllib.request,sys; r=urllib.request.urlopen('http://localhost:8888/api/status?token='+os.environ['JUPYTER_TOKEN']); sys.exit(0 if r.status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
