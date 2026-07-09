@@ -43,8 +43,12 @@ spark = (
     SparkSession.builder
     .appName("jupyter-yarn-test")
     .master("yarn")
-    .config("spark.submit.deployMode", "client")  # pyspark Builder 无 deployMode() 方法，走 config
-    .config("spark.pyspark.python", "python3")  # executor 端 python；driver 用 venv python（sys.executable），不覆盖
+    # cluster 模式：driver 跑在 YARN AM 里（集群节点），notebook 只需出站连 AM，
+    # 不需要集群回连 docker 宿主机 —— 绕开 client 模式 AM→driver 入站端口被防火墙挡的问题。
+    # 若要用 client 模式：改回 "client"，并设 spark.driver.host=<宿主机集群可达IP> +
+    # spark.driver.port / spark.driver.blockManager.port 为固定端口，宿主机防火墙放行。
+    .config("spark.submit.deployMode", "cluster")
+    .config("spark.pyspark.python", "python3")  # driver(cluster模式下在集群)与 executor 共用集群 python3
     .config("spark.yarn.stagingDir", f"/user/{HDFS_USER}/.sparkStaging")
     .config("spark.sql.shuffle.partitions", "2")
     .getOrCreate()
