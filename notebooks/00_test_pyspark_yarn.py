@@ -1,8 +1,12 @@
 # %% [markdown]
-# # PySpark ↔ YARN 集群连通性测试（client 模式，静默 WARN）
+# # PySpark ↔ YARN 集群连通性测试（cluster 模式 spark-submit）
 #
-# 前提：docker 宿主机 IP 从集群可达（已验证 10.25.100.126:12000 通），集群 DNS 解析不到宿主机主机名，
-# 所以用 spark.driver.host=IP 绕开。日志压到 ERROR，屏蔽 topology.py / jars 上传 / Another SparkContext 等 WARN。
+# 本集群 executor 无 python3，client 模式下 python 配置传不到 executor（实测 conf/env 均不生效）。
+# 改用与生产一致的 cluster 模式 spark-submit：driver 跑在 YARN AM 内，--archives ship py38 环境，
+# spark.yarn.appMasterEnv/executorEnv.PYSPARK_PYTHON 指向 ship 的 python。此模式生产已验证可用。
+#
+# notebook 用 subprocess 调 spark-submit，作业结果写 HDFS，再用本地 SparkContext 读回。
+# 全程出站，不需 docker 宿主机开端口。
 
 # %% [markdown]
 # ## 0. 前置自检
@@ -12,80 +16,71 @@ import os, glob, shutil
 
 print("JAVA_HOME =", os.environ.get("JAVA_HOME"))
 print("HADOOP_CONF_DIR =", os.environ.get("HADOOP_CONF_DIR"))
-confs = glob.glob("/etc/hadoop/conf/*.xml")
-assert confs, "❌ /etc/hadoop/conf 下没有 *.xml，先放集群配置"
+assert glob.glob("/etc/hadoop/conf/*.xml"), "❌ /etc/hadoop/conf 下没有 *.xml，先放集群配置"
 assert shutil.which("spark-submit"), "❌ 找不到 spark-submit"
 print("✅ 环境自检通过")
 
 # %% [markdown]
-# ## 1. 构造 SparkSession（YARN client 模式 + 静默日志）
+# ## 1. cluster 模式提交作业到 YARN
+#
+# flags 与生产 spark-submit 一致：--archives ship py38 环境 + PYSPARK_PYTHON 指向 ship 的 python。
+# 退出码 0 + 出现 application_xxx 即提交成功。
 
 # %%
-import os
+import os, subprocess, time, re
+
+# >>> 改成你集群上实际能读写的 HDFS 用户 <<<
+HDFS_USER = "hdfs"
+os.environ["HADOOP_USER_NAME"] = HDFS_USER  # simple 认证切换身份
+
+JOB = "/home/jovyan/work/test_job_cluster.py"
+OUT = f"/user/{HDFS_USER}/.sparkStaging/yarn_test_result_{int(time.time())}"
+
+cmd = [
+    "spark-submit",
+    "--master", "yarn",
+    "--deploy-mode", "cluster",
+    "--archives", "hdfs:///spark_envs/py38_spark.tar.gz#py38_env",
+    "--conf", "spark.yarn.appMasterEnv.PYSPARK_PYTHON=./py38_env/bin/python",
+    "--conf", "spark.executorEnv.PYSPARK_PYTHON=./py38_env/bin/python",
+    "--conf", f"spark.yarn.stagingDir=/user/{HDFS_USER}/.sparkStaging",
+    JOB, OUT,
+]
+print("提交命令:", " ".join(cmd))
+print("HDFS 输出:", OUT)
+print("--- spark-submit 输出 ---")
+
+app_ids = []
+proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+for line in proc.stdout:
+    print(line, end="")
+    m = re.search(r"application_\d+_\d+", line)
+    if m and m.group(0) not in app_ids:
+        app_ids.append(m.group(0))
+proc.wait()
+print("--- 结束 ---")
+print("退出码:", proc.returncode)
+print("YARN ApplicationID:", app_ids or "未捕获（看上面输出）")
+assert proc.returncode == 0, "❌ spark-submit 失败，看上面输出"
+print("✅ 作业提交并执行成功")
+
+# %% [markdown]
+# ## 2. 回读 HDFS 结果，确认算出来的是 1000
+#
+# 本地 SparkContext 读 HDFS（出站访问 NameNode，不开端口，不需 executor python）。
+# 读失败不影响连通性结论 —— cell 1 退出码 0 已证明 YARN 全链路通。
+
+# %%
 from pyspark.sql import SparkSession
 
-# >>> 按你的环境改这三项 <<<
-HDFS_USER = "hdfs"               # 集群上有权限的 HDFS 用户
-DRIVER_HOST = "10.25.100.126"    # docker 宿主机 IP（集群可达；主机名解析不到所以用 IP）
-DRIVER_PORT = "12000"            # 已验证从集群可达的端口
-
-# simple 认证下切换 HDFS/YARN 身份（容器 jovyan 用户集群无权限）
-os.environ["HADOOP_USER_NAME"] = HDFS_USER
-
-# 写 log4j 配置，根级别压到 ERROR，构造期 WARN（含 topology.py、jars 上传、Another SparkContext）一并屏蔽
-log4j_conf = """
-log4j.rootLogger=ERROR, console
-log4j.appender.console=org.apache.log4j.ConsoleAppender
-log4j.appender.console.target=System.err
-log4j.appender.console.layout=org.apache.log4j.PatternLayout
-log4j.appender.console.layout.ConversionPattern=%d{yy/MM/dd HH:mm:ss} %-5p %c{1}: %m%n
-log4j.logger.org.apache.hadoop.net.ScriptBasedMapping=ERROR
-log4j.logger.org.apache.spark.SparkContext=ERROR
-log4j.logger.org.apache.spark.deploy.yarn.Client=ERROR
-"""
-log4j_path = "/tmp/log4j.properties"
-with open(log4j_path, "w") as f:
-    f.write(log4j_conf)
-
-spark = (
+rspark = (
     SparkSession.builder
-    .appName("jupyter-yarn-test")
-    .master("yarn")
-    .config("spark.submit.deployMode", "client")
-    # 集群无 python3，ship 一个 py38 环境给 executor（与生产 spark-submit --archives 一致）。
-    # 用 conf 显式指定 Python（优先级最高，高于 PYSPARK_PYTHON 环境变量）。
-    # 实测本集群 spark.executorEnv.PYSPARK_PYTHON 没传到 executor，必须用 conf 才生效。
-    .config("spark.archives", "hdfs:///spark_envs/py38_spark.tar.gz#py38_env")
-    .config("spark.pyspark.python", "./py38_env/bin/python")        # executor 用 ship 的 py38
-    .config("spark.pyspark.driver.python", "/opt/venv/bin/python")  # driver 用容器 venv python（有 pyspark）
-    .config("spark.yarn.stagingDir", f"/user/{HDFS_USER}/.sparkStaging")
-    .config("spark.driver.host", DRIVER_HOST)
-    .config("spark.driver.port", DRIVER_PORT)
-    .config("spark.driver.blockManager.port", str(int(DRIVER_PORT) + 1))
-    .config("spark.port.maxRetries", "10")
-    .config("spark.ui.showConsoleProgress", "false")
-    .config("spark.driver.extraJavaOptions", f"-Dlog4j.configuration=file:{log4j_path}")
-    .config("spark.sql.shuffle.partitions", "2")
+    .appName("readback")
+    .master("local[2]")
     .getOrCreate()
 )
-sc = spark.sparkContext
-sc.setLogLevel("ERROR")  # 运行时再保底压一次
-
-print("Spark 版本:", sc.version)
-print("YARN ApplicationID:", sc.applicationId)
-
-# %% [markdown]
-# ## 2. 最小算子验证
-
-# %%
-n = sc.range(0, 1000).count()
-print("count =", n)
-assert n == 1000
-print("✅ PySpark YARN client 模式连通性测试通过")
-
-# %% [markdown]
-# ## 3. 收尾，释放 YARN 资源
-
-# %%
-spark.stop()
-print("session stopped")
+rows = [r.value for r in rspark.read.text(OUT).collect()]
+rspark.stop()
+print("集群算出的 count =", rows)
+assert rows == ["1000"], f"❌ 结果不符: {rows}"
+print("✅ PySpark YARN 连通性测试通过（cluster 模式）")
