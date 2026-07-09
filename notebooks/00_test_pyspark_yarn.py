@@ -1,85 +1,94 @@
 # %% [markdown]
 # # PySpark ↔ YARN 集群连通性测试
 #
-# 目的：在 Jupyter 里提交一个最小 Spark 作业到 YARN，验证容器 → 集群链路打通。
-# 运行方式：JupyterLab 打开本文件，逐 cell 执行（或复制到 Notebook）。
+# 本节点无法开防火墙端口，client 模式（AM 回连 driver）走不通，notebook 也不支持交互式 cluster 模式。
+# 方案：用 `spark-submit --deploy-mode cluster` 提交独立作业 —— driver 跑在 YARN AM 内，
+# notebook 只做出站提交 + 出站读 HDFS 结果，全程不开入站端口。
+# 运行方式：JupyterLab 打开本文件，逐 cell 执行。
 
 # %% [markdown]
-# ## 0. 前置自检（不连集群，先确认环境变量/配置就位）
+# ## 0. 前置自检（不连集群，确认环境变量/配置就位）
 
 # %%
-import os, glob
+import os, glob, shutil
 
-# Java8 必须就位（Spark 启动 JVM 用）
 print("JAVA_HOME =", os.environ.get("JAVA_HOME"))
 print("HADOOP_CONF_DIR =", os.environ.get("HADOOP_CONF_DIR"))
 
-# 挂载进来的集群 XML 必须存在，否则 spark 不知道 ResourceManager / NameNode 在哪
 confs = glob.glob("/etc/hadoop/conf/*.xml")
 print("hadoop xml:", confs)
 assert confs, "❌ /etc/hadoop/conf 下没有 *.xml，请先按 hadoop-conf/README.md 放集群配置"
+
+# spark-submit 由 pyspark 自带，确认在 PATH
+assert shutil.which("spark-submit"), "❌ 找不到 spark-submit，确认 pyspark 已装"
+print("spark-submit:", shutil.which("spark-submit"))
 print("✅ 环境自检通过")
 
 # %% [markdown]
-# ## 1. 构造 SparkSession（YARN client 模式）
+# ## 1. cluster 模式提交作业到 YARN
 #
-# - `master=yarn` + `deployMode=client`：driver 跑在容器里，executor 在集群
-# - `spark.pyspark.python=python3`：executor 走集群节点的 python3（镜像里没全局设，按需在这里设）
-# - `spark.yarn.stagingDir` 改成你的 HDFS 用户目录，避免权限问题
+# - driver 在 YARN AM 里跑，notebook 只出站提交，不需集群回连本机
+# - 作业结果写到 HDFS（cell 2 回读）
+# - 退出码 0 + 出现 application_xxx 即提交成功
 
 # %%
-import os
-from pyspark.sql import SparkSession
+import os, subprocess, time, re
 
-# >>> 改成你集群上实际能读写的 HDFS 用户 / 目录 <<<
-HDFS_USER = "hdfs"  # 例如 "hive" / 你的业务账号
+# >>> 改成你集群上实际能读写的 HDFS 用户 <<<
+HDFS_USER = "hdfs"
 
-# 容器以 OS 用户 jovyan 运行，HDFS/YARN 客户端默认用 jovyan 身份，集群上无权限。
-# simple 认证下，设 HADOOP_USER_NAME 即可切换身份（JVM 首次访问文件系统时读取，
-# 必须在 getOrCreate 之前设）。生产环境应配 Kerberos 或 proxy user。
+# simple 认证下，设 HADOOP_USER_NAME 切换 HDFS/YARN 身份（容器 jovyan 用户集群无权限）
 os.environ["HADOOP_USER_NAME"] = HDFS_USER
 
-spark = (
+JOB = "/home/jovyan/work/test_job_cluster.py"
+# 每次用唯一路径，避免 saveAsTextFile 目标已存在
+OUT = f"/user/{HDFS_USER}/.sparkStaging/yarn_test_result_{int(time.time())}"
+
+cmd = [
+    "spark-submit",
+    "--master", "yarn",
+    "--deploy-mode", "cluster",
+    "--conf", "spark.pyspark.python=python3",          # AM 上 Python driver + executor 用集群 python3
+    "--conf", f"spark.yarn.stagingDir=/user/{HDFS_USER}/.sparkStaging",
+    "--conf", "spark.sql.shuffle.partitions=2",
+    JOB, OUT,
+]
+print("提交命令:", " ".join(cmd))
+print("HDFS 输出:", OUT)
+print("--- spark-submit 输出 ---")
+
+app_ids = []
+proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+for line in proc.stdout:
+    print(line, end="")
+    m = re.search(r"application_\d+_\d+", line)
+    if m and m.group(0) not in app_ids:
+        app_ids.append(m.group(0))
+proc.wait()
+print("--- 结束 ---")
+print("退出码:", proc.returncode)
+print("YARN ApplicationID:", app_ids or "未捕获（看上面输出）")
+assert proc.returncode == 0, "❌ spark-submit 失败，看上面输出"
+print("✅ 作业提交并执行成功")
+
+# %% [markdown]
+# ## 2. 回读 HDFS 结果，确认算出来的是 1000
+#
+# 本地 SparkContext 读 HDFS（出站访问 NameNode，不开端口）。
+# 读失败不影响连通性结论 —— cell 1 退出码 0 已证明 YARN 全链路通。
+
+# %%
+from pyspark.sql import SparkSession
+
+rspark = (
     SparkSession.builder
-    .appName("jupyter-yarn-test")
-    .master("yarn")
-    # notebook 交互式只能用 client 模式（cluster 模式需 spark-submit 启动 driver，notebook 不支持）。
-    .config("spark.submit.deployMode", "client")
-    .config("spark.pyspark.python", "python3")  # executor 端 python；driver 用 venv python（sys.executable），不覆盖
-    .config("spark.yarn.stagingDir", f"/user/{HDFS_USER}/.sparkStaging")
-    # client 模式下 AM/executor 要回连 driver（跑在容器=宿主机）。固定端口便于防火墙放行：
-    # 宿主机防火墙需放行 DRIVER_PORT~DRIVER_PORT+maxRetries（12000-12010）入站，否则 AM 连不上 driver。
-    # 若集群节点解析不到宿主机主机名，再设 spark.driver.host=<宿主机集群可达IP>。
-    .config("spark.driver.port", "12000")
-    .config("spark.driver.blockManager.port", "12001")
-    .config("spark.port.maxRetries", "10")
-    .config("spark.sql.shuffle.partitions", "2")
+    .appName("readback")
+    .master("local[2]")
+    .config("spark.pyspark.python", "python3")
     .getOrCreate()
 )
-
-sc = spark.sparkContext
-print("Spark 版本:", sc.version)
-print("YARN ApplicationID:", sc.applicationId)  # 出现 application_xxx 说明已提交到 YARN
-
-# %% [markdown]
-# ## 2. 跑一个最小算子（range + count），验证 executor 真能起来干活
-
-# %%
-n = sc.range(0, 1000).count()
-print("count =", n)
-assert n == 1000
-print("✅ PySpark YARN 连通性测试通过")
-
-# %% [markdown]
-# ## 3. 顺带验证能读 HDFS（真正确认 NameNode 通）
-# 没有现成数据的话跳过这个 cell。
-
-# %%
-# spark.read.text("/tmp/集群上任意一个存在的文件路径").show(5)
-
-# %% [markdown]
-# ## 4. 收尾，释放 YARN 资源
-
-# %%
-spark.stop()
-print("session stopped")
+rows = [r.value for r in rspark.read.text(OUT).collect()]
+rspark.stop()
+print("集群算出的 count =", rows)
+assert rows == ["1000"], f"❌ 结果不符: {rows}"
+print("✅ PySpark YARN 连通性测试通过（cluster 模式）")
