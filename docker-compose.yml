@@ -6,7 +6,7 @@ services:
     restart: unless-stopped
     ports:
       # 仅绑定本机，外网访问请走反代（nginx/traefik + TLS）
-      - "127.0.0.1:8888:8888"
+      - "0.0.0.0:8888:8888"
     volumes:
       # notebook 持久化
       - ./notebooks:/home/jovyan/work
