@@ -14,6 +14,9 @@ services:
       # 集群配置（YARN 提交用）：把集群的 core-site/hdfs-site/yarn-site/hive-site.xml 放进对应目录
       - ./hadoop-conf:/etc/hadoop/conf:ro
       - ./hive-conf:/etc/hive/conf:ro
+      # 连接器 jar（paimon/mysql 等）：放进 ./lib，容器内为 /opt/lib，spark.jars / flink -C 引用
+      # 挂到 /opt/lib 而非 /opt：镜像内 /opt 下已有 jdk8、venv，直接挂 /opt 会覆盖掉它们
+      - ./lib:/opt/lib:ro
     environment:
       - TZ=Asia/Shanghai
       # token 从 .env 注入，避免明文入仓
