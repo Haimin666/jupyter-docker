@@ -1,34 +1,51 @@
+# 数据平台 Jupyter 服务 —— 接入 bigdata-portal 门户版
+# 拓扑：浏览器 → bigdata-portal 网关(:9910) → host.docker.internal:8888 → jupyter 容器
+#   门户网关已内置 /apps/jupyter 的 HTTP + WebSocket 反代与 cookie 重写，Jupyter 不再自建 nginx。
+# 完整部署/运维说明见 DEPLOY.md
 services:
   jupyter:
     build: .
     image: jupyter-py39:latest
     container_name: jupyter
     restart: unless-stopped
-    # host 网络：Spark YARN client 模式下集群 executor 要回连容器里的 driver，
-    # bridge 网络不可达。用 host 网络让容器共享宿主机网络（集群能解析到宿主机主机名）。
-    # 代价：jupyter 直接监听宿主机 0.0.0.0:8888，务必用防火墙或反代限制访问。
-    network_mode: host
+    # bridge 网络 + 8888 发布到宿主机：
+    # 门户容器经 host.docker.internal（host-gateway → docker0 网关 IP）访问宿主机 8888，
+    # 再由 docker-proxy 转发到本容器。注意：勿绑 127.0.0.1（docker0 网关到不了回环），
+    # 8888 的访问控制靠宿主机防火墙（仅放行门户/内网来源，见 DEPLOY.md）。
+    ports:
+      - "8888:8888"
+      # Spark driver + blockManager 端口段（YARN client 模式 executor 回连用，按需收紧）
+      - "12000-12010:12000-12010"
     volumes:
-      # notebook 持久化
+      # notebook 持久化：每用户一个子目录 notebooks/<user>/，另建 notebooks/shared/ 做团队共享
       - ./notebooks:/home/jovyan/work
       # 集群配置（YARN 提交用）：把集群的 core-site/hdfs-site/yarn-site/hive-site.xml 放进对应目录
       - ./hadoop-conf:/etc/hadoop/conf:ro
       - ./hive-conf:/etc/hive/conf:ro
       # 连接器 jar（paimon/mysql 等）：放进 ./lib，容器内为 /opt/lib，spark.jars / flink -C 引用
-      # 挂到 /opt/lib 而非 /opt：镜像内 /opt 下已有 jdk8、venv，直接挂 /opt 会覆盖掉它们
       - ./lib:/opt/lib:ro
+      # 共享只读数据集（可选）：建 ./data 目录放离线数据，容器内 /data 只读
+      - ./data:/data:ro
     environment:
       - TZ=Asia/Shanghai
-      # token 从 .env 注入，避免明文入仓
+      # Jupyter 自身认证：门户网关不注入凭证，用户在门户 iframe 首次打开时输一次 token，
+      # 会话 cookie 由门户 onProxyRes 重写种到门户域，之后免登录（与门户注释设计一致）。
       - JUPYTER_TOKEN=${JUPYTER_TOKEN:?请在 .env 中设置 JUPYTER_TOKEN}
+    # 资源上限。Compose V2 在非 swarm 下也支持 deploy.resources.limits
+    # （映射为 --memory/--cpus/--pids-limit）；数值按宿主机资源调整，pandas/pyarrow 较吃内存。
+    deploy:
+      resources:
+        limits:
+          memory: 12g
+          cpus: "6"
+          pids: 512
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: "50m"
+        max-file: "5"
     healthcheck:
-      # jupyter-server 2 的 /api/status 需要认证，带 token 才返回 200；
-      # base_url=/apps/jupyter 后路径需带前缀
+      # jupyter-server 2 的 /api/status 需要认证，带 token 才返回 200；base_url 需带前缀
       test: ["CMD", "python", "-c", "import os,urllib.request,sys; r=urllib.request.urlopen('http://localhost:8888/apps/jupyter/api/status?token='+os.environ['JUPYTER_TOKEN']); sys.exit(0 if r.status==200 else 1)"]
       interval: 30s
       timeout: 5s

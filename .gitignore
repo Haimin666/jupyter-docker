@@ -15,3 +15,7 @@ lib/*
 # 用户 notebook（运行时内容，不入仓；如需跟踪个别 notebook 用 git add -f）
 notebooks/
 .ipynb_checkpoints/
+
+# 部署侧敏感/生成文件（.env 含 token，已在顶部忽略；备份产物）
+backups/
+.reasonix/
