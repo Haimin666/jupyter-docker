@@ -69,6 +69,12 @@ RUN useradd -m -s /bin/bash jovyan
 # pyflink 日志目录（FLINK_LOG_DIR）—— 默认写到 root 所有的 pyflink/log 会权限拒绝，预建到 jovyan 家目录
 RUN mkdir -p /home/jovyan/.flink/log && chown -R jovyan:jovyan /home/jovyan/.flink
 
+# Jupyter 终端以 login shell（bash --login）启动，Debian /etc/profile 会把非 root 用户的
+# PATH 重置为 /usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games，丢掉 /opt/venv/bin。
+# 通过 /etc/profile.d 钩子在 login 时把 venv/jdk8 加回 PATH（profile.d 在 /etc/profile 末尾被 source）。
+RUN printf 'export PATH=/opt/venv/bin:/opt/jdk8/bin:$PATH\n' > /etc/profile.d/jupyter-path.sh \
+    && chmod 644 /etc/profile.d/jupyter-path.sh
+
 COPY --chown=jovyan:jovyan start.sh /home/jovyan/start.sh
 RUN chmod +x /home/jovyan/start.sh
 
