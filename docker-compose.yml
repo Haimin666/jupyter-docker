@@ -27,8 +27,9 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      # jupyter-server 2 的 /api/status 需要认证，带 token 才返回 200
-      test: ["CMD", "python", "-c", "import os,urllib.request,sys; r=urllib.request.urlopen('http://localhost:8888/api/status?token='+os.environ['JUPYTER_TOKEN']); sys.exit(0 if r.status==200 else 1)"]
+      # jupyter-server 2 的 /api/status 需要认证，带 token 才返回 200；
+      # base_url=/apps/jupyter 后路径需带前缀
+      test: ["CMD", "python", "-c", "import os,urllib.request,sys; r=urllib.request.urlopen('http://localhost:8888/apps/jupyter/api/status?token='+os.environ['JUPYTER_TOKEN']); sys.exit(0 if r.status==200 else 1)"]
       interval: 30s
       timeout: 5s
       retries: 3
